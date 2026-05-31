@@ -1,45 +1,12 @@
-export type Role = 'admin' | 'operator' | 'viewer';
+export type Role = "admin" | "operator" | "viewer";
 
-export interface Permission {
-  resource: string;
-  action: 'create' | 'read' | 'update' | 'delete' | 'bulk';
-}
-
-const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
-  admin: [
-    { resource: '*', action: 'create' },
-    { resource: '*', action: 'read' },
-    { resource: '*', action: 'update' },
-    { resource: '*', action: 'delete' },
-    { resource: '*', action: 'bulk' }
-  ],
-  operator: [
-    { resource: '*', action: 'create' },
-    { resource: '*', action: 'read' },
-    { resource: '*', action: 'update' },
-    { resource: '*', action: 'bulk' }
-  ],
-  viewer: [
-    { resource: '*', action: 'read' }
-  ]
+export const permissionMatrix: Record<Role, string[]> = {
+  admin: ["*"],
+  operator: ["resources:get", "bulk:write"],
+  viewer: ["resources:get"],
 };
 
-export function hasPermission(role: Role, resource: string, action: Permission['action']): boolean {
-  const permissions = ROLE_PERMISSIONS[role] || [];
-  return permissions.some(p => 
-    (p.resource === '*' || p.resource === resource) && p.action === action
-  );
-}
-
-export function extractUserRole(event: any): Role {
-  const authHeader = event.headers?.Authorization || event.headers?.authorization;
-  if (!authHeader) return 'viewer';
-  
-  try {
-    const token = authHeader.replace('Bearer ', '');
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    return payload.role || 'viewer';
-  } catch {
-    return 'viewer';
-  }
-}
+export const can = (role: Role, permission: string) => {
+  const grants = permissionMatrix[role] || [];
+  return grants.includes("*") || grants.includes(permission);
+};
