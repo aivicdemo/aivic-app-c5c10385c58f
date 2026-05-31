@@ -1,6 +1,15 @@
 export interface User {
-  id: string;
-  role: 'admin' | 'operator' | 'viewer';
+  userId: string;
+  loginId: string;
+  passwordHash: string;
+  userName: string;
+  email?: string;
+  roleLevel: 'admin' | 'operator' | 'viewer';
+  activeFlag: boolean;
+  lastLoginAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
 }
 
 export interface Permission {
@@ -27,15 +36,13 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   ]
 };
 
-export function hasPermission(user: User, resource: string, action: Permission['action']): boolean {
-  const permissions = ROLE_PERMISSIONS[user.role] || [];
+export function hasPermission(userRole: string, resource: string, action: string): boolean {
+  const permissions = ROLE_PERMISSIONS[userRole] || [];
   return permissions.some(p => 
     (p.resource === '*' || p.resource === resource) && p.action === action
   );
 }
 
-export function checkPermission(user: User, resource: string, action: Permission['action']): void {
-  if (!hasPermission(user, resource, action)) {
-    throw new Error(`Access denied: ${user.role} cannot ${action} ${resource}`);
-  }
+export function validateRole(role: string): role is 'admin' | 'operator' | 'viewer' {
+  return ['admin', 'operator', 'viewer'].includes(role);
 }
