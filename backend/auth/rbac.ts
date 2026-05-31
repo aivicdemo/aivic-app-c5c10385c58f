@@ -42,10 +42,10 @@ export function extractUserFromEvent(event: any): User {
   
   try {
     const token = authHeader.replace('Bearer ', '');
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+    const decoded = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      userId: payload.sub || payload.userId || 'unknown',
-      role: payload.role || 'viewer'
+      userId: decoded.sub || decoded.userId,
+      role: decoded.role || 'viewer'
     };
   } catch (error) {
     throw new Error('Invalid token');
