@@ -1,75 +1,332 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand, DeleteCommand, BatchWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { can, type Role } from "../auth/rbac";
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, UpdateCommand, DeleteCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { User, hasPermission, requirePermission } from './rbac';
+import { randomUUID } from 'crypto';
 
-type Event = {
-  path: string;
-  httpMethod: string;
-  pathParameters?: Record<string, string> | null;
-  requestContext?: { authorizer?: { role?: Role } };
-  body?: string | null;
+const client = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(client);
+const TABLE_NAME = process.env.MAIN_TABLE || 'inventory-management';
+
+const TABLE_CONFIGS = {
+  '0': { name: 'ログインユーザー', pk: 'USER' },
+  '1': { name: '商品マスタ', pk: 'PRODUCT' },
+  '2': { name: '仕入先マスタ', pk: 'SUPPLIER' },
+  '3': { name: '在庫管理', pk: 'INVENTORY' },
+  '4': { name: '仕入実績', pk: 'PURCHASE' },
+  '5': { name: '売上実績', pk: 'SALES' },
+  '6': { name: '月次集計', pk: 'MONTHLY' },
+  '7': { name: '発注推奨', pk: 'ORDER_REC' },
+  '8': { name: '商品提案情報', pk: 'PROPOSAL' },
+  '9': { name: '顧客マスタ', pk: 'CUSTOMER' },
+  '10': { name: 'ペット情報', pk: 'PET' },
+  '11': { name: '顧客利用履歴', pk: 'USAGE' },
+  '12': { name: '需要予測', pk: 'FORECAST' },
+  '13': { name: '発注履歴', pk: 'ORDER_HIST' },
+  '14': { name: '在庫調整履歴', pk: 'ADJUST_HIST' }
 };
 
-const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const tableName = process.env.MAIN_TABLE || "aivic_app_records";
-const nowIso = () => new Date().toISOString();
-const newId = () => typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function getCurrentUser(event: APIGatewayProxyEvent): User {
+  const role = event.headers['x-user-role'] || 'viewer';
+  const userId = event.headers['x-user-id'] || 'anonymous';
+  return {
+    id: userId,
+    role: role as 'admin' | 'operator' | 'viewer'
+  };
+}
 
-const json = (statusCode: number, body: unknown) => ({
-  statusCode,
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body),
-});
+function createResponse(statusCode: number, body: any): APIGatewayProxyResult {
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, x-user-role, x-user-id'
+    },
+    body: JSON.stringify(body)
+  };
+}
 
-const parseBody = (body?: string | null) => {
-  if (!body) return {};
-  try { return JSON.parse(body); } catch { return {}; }
-};
-
-const writeAuditLog = async (action: string, role: Role, detail: Record<string, unknown>) => {
-  const ts = nowIso();
-  await db.send(new PutCommand({
-    TableName: tableName,
-    Item: { pk: "AUDIT", sk: `LOG#${ts}#${Math.random().toString(36).slice(2, 8)}`, action, role, detail, createdAt: ts },
+async function createAuditLog(action: string, resource: string, userId: string, details?: any): Promise<void> {
+  const auditItem = {
+    pk: 'AUDIT',
+    sk: `${Date.now()}_${randomUUID()}`,
+    action,
+    resource,
+    userId,
+    timestamp: new Date().toISOString(),
+    details: details || {}
+  };
+  
+  await docClient.send(new PutCommand({
+    TableName: TABLE_NAME,
+    Item: auditItem
   }));
-};
+}
 
-const bulkWrite = async (items: Record<string, unknown>[]): Promise<{ imported: number; failed: number; errors: string[] }> => {
-  const now = nowIso();
-  const prepared = items.map((item) => ({ ...item, id: item.id || newId(), createdAt: item.createdAt || now, updatedAt: now }));
-  let imported = 0;
-  const errors: string[] = [];
-  const chunks: Record<string, unknown>[][] = [];
-  for (let i = 0; i < prepared.length; i += 25) chunks.push(prepared.slice(i, i + 25));
-  for (const chunk of chunks) {
-    try {
-      await db.send(new BatchWriteCommand({ RequestItems: { [tableName]: chunk.map((item) => ({ PutRequest: { Item: item } })) } }));
-      imported += chunk.length;
-    } catch (e) { errors.push(e instanceof Error ? e.message : String(e)); }
+function validateTableIndex(tableIndex: string): boolean {
+  return tableIndex in TABLE_CONFIGS;
+}
+
+function addTimestamps(item: any, isUpdate: boolean = false): any {
+  const now = new Date().toISOString();
+  if (!isUpdate) {
+    item.createdAt = now;
   }
-  return { imported, failed: items.length - imported, errors };
-};
+  item.updatedAt = now;
+  return item;
+}
 
-export const handler = async (event: Event) => {
-  const role = (event.requestContext?.authorizer?.role || "viewer") as Role;
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   try {
-    const bulkMatch = event.path.match(/^\/api\/(\d+)\/bulk$/);
-    if (bulkMatch && event.httpMethod === "POST") {
-      if (!can(role, "bulk:write")) return json(403, { message: "forbidden" });
-      const body = parseBody(event.body);
-      const items: Record<string, unknown>[] = Array.isArray(body.items) ? body.items : [];
-      if (items.length === 0) return json(400, { message: "items array is required" });
-      const result = await bulkWrite(items);
-      await writeAuditLog("bulk_import", role, { tableIndex: bulkMatch[1], count: result.imported });
-      return json(200, result);
+    const user = getCurrentUser(event);
+    const method = event.httpMethod;
+    const path = event.path;
+    const pathParts = path.split('/').filter(p => p);
+    
+    if (method === 'OPTIONS') {
+      return createResponse(200, {});
     }
-  if (event.path === "/resources" && event.httpMethod === "GET") {
-    if (!can(role, "resources:get")) return json(403, { message: "forbidden" });
-    return json(200, { ok: true, route: "GET /resources" });
-  }
-    return json(404, { message: "not found" });
+
+    // GET /resources
+    if (method === 'GET' && path === '/resources') {
+      if (!hasPermission(user, 'resources', 'read')) {
+        return createResponse(403, { error: 'Access denied' });
+      }
+      
+      const resources = Object.entries(TABLE_CONFIGS).map(([index, config]) => ({
+        index,
+        name: config.name,
+        pk: config.pk
+      }));
+      
+      return createResponse(200, { resources });
+    }
+
+    // API routes: /api/{tableIndex}/*
+    if (pathParts[0] === 'api' && pathParts[1]) {
+      const tableIndex = pathParts[1];
+      
+      if (!validateTableIndex(tableIndex)) {
+        return createResponse(404, { error: 'Table not found' });
+      }
+      
+      const tableConfig = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
+      const resource = tableConfig.name;
+      
+      // POST /api/{tableIndex}/bulk - 一括インポート
+      if (method === 'POST' && pathParts[2] === 'bulk') {
+        if (!hasPermission(user, resource, 'bulk')) {
+          return createResponse(403, { error: 'Access denied' });
+        }
+        
+        const body = JSON.parse(event.body || '{}');
+        const items = body.items || [];
+        
+        if (!Array.isArray(items)) {
+          return createResponse(400, { error: 'Items must be an array' });
+        }
+        
+        let imported = 0;
+        let failed = 0;
+        const errors: string[] = [];
+        
+        // 25件ずつに分割してバッチ処理
+        for (let i = 0; i < items.length; i += 25) {
+          const batch = items.slice(i, i + 25);
+          const putRequests = batch.map(item => {
+            const processedItem = {
+              ...item,
+              pk: tableConfig.pk,
+              sk: item.id || randomUUID(),
+              id: item.id || randomUUID(),
+              ...addTimestamps(item, false)
+            };
+            
+            return {
+              PutRequest: {
+                Item: processedItem
+              }
+            };
+          });
+          
+          try {
+            await docClient.send(new BatchWriteCommand({
+              RequestItems: {
+                [TABLE_NAME]: putRequests
+              }
+            }));
+            imported += batch.length;
+          } catch (error) {
+            failed += batch.length;
+            errors.push(`Batch ${Math.floor(i/25) + 1}: ${error}`);
+          }
+        }
+        
+        await createAuditLog('BULK_IMPORT', resource, user.id, { imported, failed });
+        
+        return createResponse(200, { imported, failed, errors });
+      }
+      
+      // GET /api/{tableIndex} - 一覧取得
+      if (method === 'GET' && pathParts.length === 2) {
+        if (!hasPermission(user, resource, 'read')) {
+          return createResponse(403, { error: 'Access denied' });
+        }
+        
+        const result = await docClient.send(new ScanCommand({
+          TableName: TABLE_NAME,
+          FilterExpression: 'pk = :pk',
+          ExpressionAttributeValues: {
+            ':pk': tableConfig.pk
+          }
+        }));
+        
+        return createResponse(200, { items: result.Items || [] });
+      }
+      
+      // GET /api/{tableIndex}/{id} - 詳細取得
+      if (method === 'GET' && pathParts.length === 3) {
+        if (!hasPermission(user, resource, 'read')) {
+          return createResponse(403, { error: 'Access denied' });
+        }
+        
+        const id = pathParts[2];
+        const result = await docClient.send(new GetCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            pk: tableConfig.pk,
+            sk: id
+          }
+        }));
+        
+        if (!result.Item) {
+          return createResponse(404, { error: 'Item not found' });
+        }
+        
+        return createResponse(200, result.Item);
+      }
+      
+      // POST /api/{tableIndex} - 新規作成
+      if (method === 'POST' && pathParts.length === 2) {
+        if (!hasPermission(user, resource, 'create')) {
+          return createResponse(403, { error: 'Access denied' });
+        }
+        
+        const body = JSON.parse(event.body || '{}');
+        const id = body.id || randomUUID();
+        
+        const item = {
+          ...body,
+          pk: tableConfig.pk,
+          sk: id,
+          id,
+          ...addTimestamps(body, false),
+          createdBy: user.id,
+          updatedBy: user.id
+        };
+        
+        await docClient.send(new PutCommand({
+          TableName: TABLE_NAME,
+          Item: item
+        }));
+        
+        await createAuditLog('CREATE', resource, user.id, { id });
+        
+        return createResponse(201, item);
+      }
+      
+      // PUT /api/{tableIndex}/{id} - 更新
+      if (method === 'PUT' && pathParts.length === 3) {
+        if (!hasPermission(user, resource, 'update')) {
+          return createResponse(403, { error: 'Access denied' });
+        }
+        
+        const id = pathParts[2];
+        const body = JSON.parse(event.body || '{}');
+        
+        // 既存アイテムの確認
+        const existing = await docClient.send(new GetCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            pk: tableConfig.pk,
+            sk: id
+          }
+        }));
+        
+        if (!existing.Item) {
+          return createResponse(404, { error: 'Item not found' });
+        }
+        
+        const updatedItem = {
+          ...existing.Item,
+          ...body,
+          pk: tableConfig.pk,
+          sk: id,
+          id,
+          ...addTimestamps(body, true),
+          updatedBy: user.id
+        };
+        
+        await docClient.send(new PutCommand({
+          TableName: TABLE_NAME,
+          Item: updatedItem
+        }));
+        
+        await createAuditLog('UPDATE', resource, user.id, { id });
+        
+        return createResponse(200, updatedItem);
+      }
+      
+      // DELETE /api/{tableIndex}/{id} - 削除
+      if (method === 'DELETE' && pathParts.length === 3) {
+        if (!hasPermission(user, resource, 'delete')) {
+          return createResponse(403, { error: 'Access denied' });
+        }
+        
+        const id = pathParts[2];
+        
+        // 既存アイテムの確認
+        const existing = await docClient.send(new GetCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            pk: tableConfig.pk,
+            sk: id
+          }
+        }));
+        
+        if (!existing.Item) {
+          return createResponse(404, { error: 'Item not found' });
+        }
+        
+        await docClient.send(new DeleteCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            pk: tableConfig.pk,
+            sk: id
+          }
+        }));
+        
+        await createAuditLog('DELETE', resource, user.id, { id });
+        
+        return createResponse(200, { message: 'Item deleted successfully' });
+      }
+    }
+    
+    return createResponse(404, { error: 'Endpoint not found' });
+    
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return json(500, { message: "internal error", detail });
+    console.error('Error:', error);
+    
+    if (error instanceof Error && error.message.includes('Access denied')) {
+      return createResponse(403, { error: error.message });
+    }
+    
+    if (error instanceof SyntaxError) {
+      return createResponse(400, { error: 'Invalid JSON in request body' });
+    }
+    
+    return createResponse(500, { error: 'Internal server error' });
   }
 };
