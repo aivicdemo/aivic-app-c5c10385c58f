@@ -27,27 +27,15 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   ]
 };
 
-export function hasPermission(user: User, resource: string, action: string): boolean {
+export function hasPermission(user: User, resource: string, action: Permission['action']): boolean {
   const permissions = ROLE_PERMISSIONS[user.role] || [];
   return permissions.some(p => 
     (p.resource === '*' || p.resource === resource) && p.action === action
   );
 }
 
-export function extractUserFromEvent(event: any): User {
-  const authHeader = event.headers?.Authorization || event.headers?.authorization;
-  if (!authHeader) {
-    throw new Error('Authorization header required');
-  }
-  
-  try {
-    const token = authHeader.replace('Bearer ', '');
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    return {
-      id: payload.sub || 'unknown',
-      role: payload.role || 'viewer'
-    };
-  } catch (error) {
-    throw new Error('Invalid token');
+export function requirePermission(user: User, resource: string, action: Permission['action']): void {
+  if (!hasPermission(user, resource, action)) {
+    throw new Error(`Insufficient permissions: ${user.role} cannot ${action} ${resource}`);
   }
 }
