@@ -1,10 +1,6 @@
 export interface User {
-  userId: string;
-  loginId: string;
-  userName: string;
-  email?: string;
+  id: string;
   role: 'admin' | 'operator' | 'viewer';
-  isActive: boolean;
 }
 
 export interface Permission {
@@ -32,38 +28,26 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
 };
 
 export function hasPermission(user: User, resource: string, action: string): boolean {
-  if (!user.isActive) return false;
-  
   const permissions = ROLE_PERMISSIONS[user.role] || [];
   return permissions.some(p => 
-    (p.resource === '*' || p.resource === resource) && 
-    (p.action === action)
+    (p.resource === '*' || p.resource === resource) && p.action === action
   );
 }
 
-export function extractUserFromEvent(event: any): User | null {
+export function extractUserFromEvent(event: any): User {
+  const authHeader = event.headers?.Authorization || event.headers?.authorization;
+  if (!authHeader) {
+    throw new Error('Authorization header required');
+  }
+  
   try {
-    const authHeader = event.headers?.Authorization || event.headers?.authorization;
-    if (!authHeader) return null;
-    
     const token = authHeader.replace('Bearer ', '');
-    const decoded = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      userId: decoded.userId || 'anonymous',
-      loginId: decoded.loginId || 'anonymous',
-      userName: decoded.userName || 'Anonymous User',
-      email: decoded.email,
-      role: decoded.role || 'viewer',
-      isActive: decoded.isActive !== false
+      id: payload.sub || payload.userId,
+      role: payload.role || 'viewer'
     };
-  } catch {
-    return {
-      userId: 'anonymous',
-      loginId: 'anonymous', 
-      userName: 'Anonymous User',
-      role: 'viewer',
-      isActive: true
-    };
+  } catch (error) {
+    throw new Error('Invalid token');
   }
 }
