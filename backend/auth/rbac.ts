@@ -37,14 +37,14 @@ export function hasPermission(user: User, resource: string, action: string): boo
 export function extractUserFromEvent(event: any): User {
   const authHeader = event.headers?.Authorization || event.headers?.authorization;
   if (!authHeader) {
-    throw new Error('Authorization header missing');
+    throw new Error('No authorization header');
   }
   
   try {
     const token = authHeader.replace('Bearer ', '');
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      id: payload.sub || payload.userId || 'unknown',
+      id: payload.sub || 'unknown',
       role: payload.role || 'viewer'
     };
   } catch (error) {
