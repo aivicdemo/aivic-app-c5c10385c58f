@@ -30,13 +30,24 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
 export function hasPermission(user: User, resource: string, action: string): boolean {
   const permissions = ROLE_PERMISSIONS[user.role] || [];
   return permissions.some(p => 
-    (p.resource === '*' || p.resource === resource) && 
-    (p.action === action)
+    (p.resource === '*' || p.resource === resource) && p.action === action
   );
 }
 
-export function requirePermission(user: User, resource: string, action: string): void {
-  if (!hasPermission(user, resource, action)) {
-    throw new Error(`Insufficient permissions: ${user.role} cannot ${action} ${resource}`);
+export function extractUserFromEvent(event: any): User {
+  const authHeader = event.headers?.Authorization || event.headers?.authorization;
+  if (!authHeader) {
+    throw new Error('Authorization header required');
+  }
+  
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+    return {
+      id: payload.sub || payload.userId || 'unknown',
+      role: payload.role || 'viewer'
+    };
+  } catch {
+    return { id: 'anonymous', role: 'viewer' };
   }
 }
