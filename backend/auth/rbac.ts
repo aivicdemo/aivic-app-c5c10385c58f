@@ -37,7 +37,7 @@ export function hasPermission(user: User, resource: string, action: string): boo
 export function extractUserFromEvent(event: any): User {
   const authHeader = event.headers?.Authorization || event.headers?.authorization;
   if (!authHeader) {
-    throw new Error('Authorization header required');
+    throw new Error('Authorization header missing');
   }
   
   try {
