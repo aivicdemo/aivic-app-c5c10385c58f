@@ -1,5 +1,5 @@
 export interface User {
-  id: string;
+  userId: string;
   role: 'admin' | 'operator' | 'viewer';
 }
 
@@ -44,7 +44,7 @@ export function extractUserFromEvent(event: any): User {
     const token = authHeader.replace('Bearer ', '');
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      id: payload.sub || payload.userId || 'unknown',
+      userId: payload.sub || payload.userId,
       role: payload.role || 'viewer'
     };
   } catch (error) {
