@@ -27,15 +27,16 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   ]
 };
 
-export function hasPermission(user: User, resource: string, action: Permission['action']): boolean {
+export function hasPermission(user: User, resource: string, action: string): boolean {
   const permissions = ROLE_PERMISSIONS[user.role] || [];
   return permissions.some(p => 
-    (p.resource === '*' || p.resource === resource) && p.action === action
+    (p.resource === '*' || p.resource === resource) && 
+    (p.action === action)
   );
 }
 
-export function checkPermission(user: User, resource: string, action: Permission['action']): void {
+export function checkPermission(user: User, resource: string, action: string): void {
   if (!hasPermission(user, resource, action)) {
-    throw new Error(`Forbidden: ${user.role} cannot ${action} ${resource}`);
+    throw new Error(`Access denied: ${user.role} cannot ${action} ${resource}`);
   }
 }
