@@ -1,6 +1,7 @@
 export interface User {
   id: string;
   role: 'admin' | 'operator' | 'viewer';
+  permissions: string[];
 }
 
 export interface Permission {
@@ -37,7 +38,7 @@ export function hasPermission(user: User, resource: string, action: string): boo
 export function extractUserFromEvent(event: any): User {
   const authHeader = event.headers?.Authorization || event.headers?.authorization;
   if (!authHeader) {
-    throw new Error('No authorization header');
+    throw new Error('Authorization header required');
   }
   
   try {
@@ -45,9 +46,10 @@ export function extractUserFromEvent(event: any): User {
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
       id: payload.sub || 'unknown',
-      role: payload.role || 'viewer'
+      role: payload.role || 'viewer',
+      permissions: payload.permissions || []
     };
-  } catch {
-    return { id: 'anonymous', role: 'viewer' };
+  } catch (error) {
+    throw new Error('Invalid token');
   }
 }
