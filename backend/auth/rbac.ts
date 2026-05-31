@@ -1,12 +1,25 @@
-export type Role = "admin" | "operator" | "viewer";
+export type Role = 'admin' | 'operator' | 'viewer';
 
-export const permissionMatrix: Record<Role, string[]> = {
-  admin: ["*"],
-  operator: ["resources:get", "bulk:write"],
-  viewer: ["resources:get"],
+export interface Permission {
+  read: boolean;
+  write: boolean;
+  delete: boolean;
+}
+
+export const ROLE_PERMISSIONS: Record<Role, Permission> = {
+  admin: { read: true, write: true, delete: true },
+  operator: { read: true, write: true, delete: false },
+  viewer: { read: true, write: false, delete: false }
 };
 
-export const can = (role: Role, permission: string) => {
-  const grants = permissionMatrix[role] || [];
-  return grants.includes("*") || grants.includes(permission);
-};
+export function hasPermission(role: Role, action: 'read' | 'write' | 'delete'): boolean {
+  const permission = ROLE_PERMISSIONS[role];
+  return permission[action];
+}
+
+export function validateRole(role: string): Role {
+  if (!['admin', 'operator', 'viewer'].includes(role)) {
+    throw new Error('Invalid role');
+  }
+  return role as Role;
+}
