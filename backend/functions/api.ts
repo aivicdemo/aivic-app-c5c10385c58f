@@ -1,471 +1,364 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, UpdateCommand, DeleteCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, UpdateCommand, DeleteCommand, QueryCommand, BatchWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { hasPermission, createUser, PERMISSIONS } from './rbac';
+import { User, checkPermission } from './rbac';
 import { randomUUID } from 'crypto';
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
-const TABLE_NAME = process.env.MAIN_TABLE || 'inventory-management-table';
+const TABLE_NAME = process.env.MAIN_TABLE!;
 
-interface ApiResponse {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: string;
+interface TableConfig {
+  name: string;
+  pkField: string;
+  gsiFields?: string[];
 }
 
-const CORS_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+const TABLES: Record<string, TableConfig> = {
+  '0': { name: 'LoginUser', pkField: 'userId' },
+  '1': { name: 'ProductMaster', pkField: 'productId' },
+  '2': { name: 'SupplierMaster', pkField: 'supplierId' },
+  '3': { name: 'InventoryManagement', pkField: 'inventoryId' },
+  '4': { name: 'PurchaseRecord', pkField: 'purchaseRecordId' },
+  '5': { name: 'SalesRecord', pkField: 'salesRecordId' },
+  '6': { name: 'MonthlySummary', pkField: 'summaryId' },
+  '7': { name: 'OrderRecommendation', pkField: 'orderRecommendationId' },
+  '8': { name: 'ProductProposal', pkField: 'proposalId' },
+  '9': { name: 'CustomerMaster', pkField: 'customerId' },
+  '10': { name: 'PetInfo', pkField: 'petId' },
+  '11': { name: 'CustomerUsageHistory', pkField: 'usageHistoryId' },
+  '12': { name: 'DemandForecast', pkField: 'demandForecastId' },
+  '13': { name: 'OrderHistory', pkField: 'orderHistoryId' },
+  '14': { name: 'InventoryAdjustmentHistory', pkField: 'adjustmentHistoryId' }
 };
 
-const TABLE_CONFIGS = {
-  '0': { name: 'ログインユーザー', pk: 'USER', permissions: { read: PERMISSIONS.READ_USERS, write: PERMISSIONS.WRITE_USERS, delete: PERMISSIONS.DELETE_USERS } },
-  '1': { name: '商品マスタ', pk: 'PRODUCT', permissions: { read: PERMISSIONS.READ_PRODUCTS, write: PERMISSIONS.WRITE_PRODUCTS, delete: PERMISSIONS.DELETE_PRODUCTS } },
-  '2': { name: '仕入先マスタ', pk: 'SUPPLIER', permissions: { read: PERMISSIONS.READ_SUPPLIERS, write: PERMISSIONS.WRITE_SUPPLIERS, delete: PERMISSIONS.DELETE_SUPPLIERS } },
-  '3': { name: '在庫管理', pk: 'INVENTORY', permissions: { read: PERMISSIONS.READ_INVENTORY, write: PERMISSIONS.WRITE_INVENTORY, delete: PERMISSIONS.DELETE_INVENTORY } },
-  '4': { name: '仕入実績', pk: 'PURCHASE_RECORD', permissions: { read: PERMISSIONS.READ_PURCHASE_RECORDS, write: PERMISSIONS.WRITE_PURCHASE_RECORDS, delete: PERMISSIONS.DELETE_PURCHASE_RECORDS } },
-  '5': { name: '売上実績', pk: 'SALES_RECORD', permissions: { read: PERMISSIONS.READ_SALES_RECORDS, write: PERMISSIONS.WRITE_SALES_RECORDS, delete: PERMISSIONS.DELETE_SALES_RECORDS } },
-  '6': { name: '月次集計', pk: 'MONTHLY_SUMMARY', permissions: { read: PERMISSIONS.READ_MONTHLY_SUMMARY, write: PERMISSIONS.WRITE_MONTHLY_SUMMARY, delete: PERMISSIONS.DELETE_MONTHLY_SUMMARY } },
-  '7': { name: '発注推奨', pk: 'ORDER_RECOMMENDATION', permissions: { read: PERMISSIONS.READ_ORDER_RECOMMENDATIONS, write: PERMISSIONS.WRITE_ORDER_RECOMMENDATIONS, delete: PERMISSIONS.DELETE_ORDER_RECOMMENDATIONS } },
-  '8': { name: '商品提案情報', pk: 'PRODUCT_PROPOSAL', permissions: { read: PERMISSIONS.READ_PRODUCT_PROPOSALS, write: PERMISSIONS.WRITE_PRODUCT_PROPOSALS, delete: PERMISSIONS.DELETE_PRODUCT_PROPOSALS } },
-  '9': { name: '顧客マスタ', pk: 'CUSTOMER', permissions: { read: PERMISSIONS.READ_CUSTOMERS, write: PERMISSIONS.WRITE_CUSTOMERS, delete: PERMISSIONS.DELETE_CUSTOMERS } },
-  '10': { name: 'ペット情報', pk: 'PET', permissions: { read: PERMISSIONS.READ_PETS, write: PERMISSIONS.WRITE_PETS, delete: PERMISSIONS.DELETE_PETS } },
-  '11': { name: '顧客利用履歴', pk: 'CUSTOMER_HISTORY', permissions: { read: PERMISSIONS.READ_CUSTOMER_HISTORY, write: PERMISSIONS.WRITE_CUSTOMER_HISTORY, delete: PERMISSIONS.DELETE_CUSTOMER_HISTORY } },
-  '12': { name: '需要予測', pk: 'DEMAND_FORECAST', permissions: { read: PERMISSIONS.READ_DEMAND_FORECAST, write: PERMISSIONS.WRITE_DEMAND_FORECAST, delete: PERMISSIONS.DELETE_DEMAND_FORECAST } },
-  '13': { name: '発注履歴', pk: 'ORDER_HISTORY', permissions: { read: PERMISSIONS.READ_ORDER_HISTORY, write: PERMISSIONS.WRITE_ORDER_HISTORY, delete: PERMISSIONS.DELETE_ORDER_HISTORY } },
-  '14': { name: '在庫調整履歴', pk: 'INVENTORY_ADJUSTMENT', permissions: { read: PERMISSIONS.READ_INVENTORY_ADJUSTMENTS, write: PERMISSIONS.WRITE_INVENTORY_ADJUSTMENTS, delete: PERMISSIONS.DELETE_INVENTORY_ADJUSTMENTS } }
-};
-
-function createResponse(statusCode: number, body: any): ApiResponse {
+function createResponse(statusCode: number, body: any): APIGatewayProxyResult {
   return {
     statusCode,
-    headers: CORS_HEADERS,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+    },
     body: JSON.stringify(body)
   };
 }
 
-function getUserFromEvent(event: APIGatewayProxyEvent) {
+function getCurrentUser(event: APIGatewayProxyEvent): User {
   const authHeader = event.headers.Authorization || event.headers.authorization;
   if (!authHeader) {
-    return null;
+    throw new Error('Authorization header required');
   }
   
   try {
     const token = authHeader.replace('Bearer ', '');
-    const [userId, role] = token.split(':');
-    if (!userId || !['admin', 'operator', 'viewer'].includes(role)) {
-      return null;
-    }
-    return createUser(userId, role as 'admin' | 'operator' | 'viewer');
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+    return {
+      id: payload.sub || 'anonymous',
+      role: payload.role || 'viewer'
+    };
   } catch {
-    return null;
+    return { id: 'anonymous', role: 'viewer' };
   }
 }
 
-async function writeAuditLog(action: string, userId: string, details: any) {
-  const auditLog = {
+async function createAuditLog(user: User, action: string, resource: string, details: any): Promise<void> {
+  const auditItem = {
     pk: 'AUDIT',
     sk: `${Date.now()}_${randomUUID()}`,
+    userId: user.id,
     action,
-    userId,
-    details,
+    resource,
+    details: JSON.stringify(details),
     timestamp: new Date().toISOString()
   };
   
-  try {
-    await docClient.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: auditLog
-    }));
-  } catch (error) {
-    console.error('Failed to write audit log:', error);
-  }
+  await docClient.send(new PutCommand({
+    TableName: TABLE_NAME,
+    Item: auditItem
+  }));
 }
 
-async function handleGetResources(event: APIGatewayProxyEvent): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
+function addTimestamps(item: any, isUpdate: boolean = false): any {
+  const now = new Date().toISOString();
+  if (!isUpdate) {
+    item.createdAt = now;
   }
-
-  try {
-    const resources = Object.entries(TABLE_CONFIGS).map(([index, config]) => ({
-      index,
-      name: config.name,
-      canRead: hasPermission(user, config.permissions.read),
-      canWrite: hasPermission(user, config.permissions.write),
-      canDelete: hasPermission(user, config.permissions.delete)
-    }));
-
-    return createResponse(200, { resources });
-  } catch (error) {
-    console.error('Error getting resources:', error);
-    return createResponse(500, { error: 'Internal server error' });
-  }
+  item.updatedAt = now;
+  return item;
 }
 
-async function handleGetTableData(event: APIGatewayProxyEvent, tableIndex: string): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
-  }
+function generateId(): string {
+  return randomUUID();
+}
 
-  const config = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
-  if (!config) {
-    return createResponse(404, { error: 'Table not found' });
-  }
-
-  if (!hasPermission(user, config.permissions.read)) {
-    return createResponse(403, { error: 'Forbidden' });
-  }
-
+async function handleGetResources(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
+    const user = getCurrentUser(event);
+    checkPermission(user, 'resources', 'read');
+
     const result = await docClient.send(new ScanCommand({
       TableName: TABLE_NAME,
-      FilterExpression: 'pk = :pk',
+      FilterExpression: 'attribute_exists(pk) AND pk <> :auditPk',
       ExpressionAttributeValues: {
-        ':pk': config.pk
+        ':auditPk': 'AUDIT'
       }
     }));
 
-    return createResponse(200, { items: result.Items || [] });
-  } catch (error) {
-    console.error('Error scanning table:', error);
+    return createResponse(200, {
+      items: result.Items || [],
+      count: result.Count || 0
+    });
+  } catch (error: any) {
+    if (error.message.includes('Access denied')) {
+      return createResponse(403, { error: error.message });
+    }
     return createResponse(500, { error: 'Internal server error' });
   }
 }
 
-async function handleGetTableItem(event: APIGatewayProxyEvent, tableIndex: string): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
-  }
-
-  const config = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
-  if (!config) {
-    return createResponse(404, { error: 'Table not found' });
-  }
-
-  if (!hasPermission(user, config.permissions.read)) {
-    return createResponse(403, { error: 'Forbidden' });
-  }
-
-  const itemId = event.pathParameters?.id;
-  if (!itemId) {
-    return createResponse(400, { error: 'Item ID is required' });
-  }
-
+async function handleTableOperation(event: APIGatewayProxyEvent, tableIndex: string): Promise<APIGatewayProxyResult> {
   try {
+    const user = getCurrentUser(event);
+    const tableConfig = TABLES[tableIndex];
+    
+    if (!tableConfig) {
+      return createResponse(404, { error: 'Table not found' });
+    }
+
+    const method = event.httpMethod;
+    const pathParts = event.path.split('/');
+    const isBulkOperation = pathParts[pathParts.length - 1] === 'bulk';
+    
+    if (isBulkOperation && method === 'POST') {
+      return await handleBulkImport(event, tableConfig, user);
+    }
+
+    switch (method) {
+      case 'GET':
+        return await handleGet(event, tableConfig, user);
+      case 'POST':
+        return await handleCreate(event, tableConfig, user);
+      case 'PUT':
+        return await handleUpdate(event, tableConfig, user);
+      case 'DELETE':
+        return await handleDelete(event, tableConfig, user);
+      default:
+        return createResponse(405, { error: 'Method not allowed' });
+    }
+  } catch (error: any) {
+    if (error.message.includes('Access denied')) {
+      return createResponse(403, { error: error.message });
+    }
+    return createResponse(500, { error: 'Internal server error' });
+  }
+}
+
+async function handleGet(event: APIGatewayProxyEvent, tableConfig: TableConfig, user: User): Promise<APIGatewayProxyResult> {
+  checkPermission(user, tableConfig.name, 'read');
+  
+  const id = event.pathParameters?.id;
+  
+  if (id) {
     const result = await docClient.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: {
-        pk: config.pk,
-        sk: itemId
+        pk: tableConfig.name,
+        sk: id
       }
     }));
-
+    
     if (!result.Item) {
       return createResponse(404, { error: 'Item not found' });
     }
-
+    
     return createResponse(200, result.Item);
-  } catch (error) {
-    console.error('Error getting item:', error);
-    return createResponse(500, { error: 'Internal server error' });
-  }
-}
-
-async function handleCreateTableItem(event: APIGatewayProxyEvent, tableIndex: string): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
-  }
-
-  const config = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
-  if (!config) {
-    return createResponse(404, { error: 'Table not found' });
-  }
-
-  if (!hasPermission(user, config.permissions.write)) {
-    return createResponse(403, { error: 'Forbidden' });
-  }
-
-  if (!event.body) {
-    return createResponse(400, { error: 'Request body is required' });
-  }
-
-  try {
-    const data = JSON.parse(event.body);
-    const now = new Date().toISOString();
-    const itemId = randomUUID();
-    
-    const item = {
-      ...data,
-      pk: config.pk,
-      sk: itemId,
-      id: itemId,
-      createdAt: now,
-      updatedAt: now,
-      createdBy: user.id,
-      updatedBy: user.id
-    };
-
-    await docClient.send(new PutCommand({
+  } else {
+    const result = await docClient.send(new QueryCommand({
       TableName: TABLE_NAME,
-      Item: item
+      KeyConditionExpression: 'pk = :pk',
+      ExpressionAttributeValues: {
+        ':pk': tableConfig.name
+      }
     }));
-
-    await writeAuditLog('CREATE', user.id, { table: config.name, itemId, data });
-
-    return createResponse(201, item);
-  } catch (error) {
-    console.error('Error creating item:', error);
-    if (error instanceof SyntaxError) {
-      return createResponse(400, { error: 'Invalid JSON in request body' });
-    }
-    return createResponse(500, { error: 'Internal server error' });
+    
+    return createResponse(200, {
+      items: result.Items || [],
+      count: result.Count || 0
+    });
   }
 }
 
-async function handleUpdateTableItem(event: APIGatewayProxyEvent, tableIndex: string): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
-  }
-
-  const config = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
-  if (!config) {
-    return createResponse(404, { error: 'Table not found' });
-  }
-
-  if (!hasPermission(user, config.permissions.write)) {
-    return createResponse(403, { error: 'Forbidden' });
-  }
-
-  const itemId = event.pathParameters?.id;
-  if (!itemId) {
-    return createResponse(400, { error: 'Item ID is required' });
-  }
-
+async function handleCreate(event: APIGatewayProxyEvent, tableConfig: TableConfig, user: User): Promise<APIGatewayProxyResult> {
+  checkPermission(user, tableConfig.name, 'create');
+  
   if (!event.body) {
-    return createResponse(400, { error: 'Request body is required' });
+    return createResponse(400, { error: 'Request body required' });
   }
+  
+  const item = JSON.parse(event.body);
+  const id = generateId();
+  
+  const dbItem = {
+    pk: tableConfig.name,
+    sk: id,
+    [tableConfig.pkField]: id,
+    ...addTimestamps(item),
+    createdBy: user.id,
+    updatedBy: user.id
+  };
+  
+  await docClient.send(new PutCommand({
+    TableName: TABLE_NAME,
+    Item: dbItem
+  }));
+  
+  await createAuditLog(user, 'CREATE', tableConfig.name, { id, item });
+  
+  return createResponse(201, dbItem);
+}
 
-  try {
-    const data = JSON.parse(event.body);
-    const now = new Date().toISOString();
-    
-    const updateExpressions: string[] = [];
-    const expressionAttributeNames: Record<string, string> = {};
-    const expressionAttributeValues: Record<string, any> = {};
-    
-    Object.keys(data).forEach((key, index) => {
-      if (key !== 'pk' && key !== 'sk' && key !== 'id' && key !== 'createdAt' && key !== 'createdBy') {
-        const attrName = `#attr${index}`;
-        const attrValue = `:val${index}`;
-        updateExpressions.push(`${attrName} = ${attrValue}`);
-        expressionAttributeNames[attrName] = key;
-        expressionAttributeValues[attrValue] = data[key];
-      }
+async function handleUpdate(event: APIGatewayProxyEvent, tableConfig: TableConfig, user: User): Promise<APIGatewayProxyResult> {
+  checkPermission(user, tableConfig.name, 'update');
+  
+  const id = event.pathParameters?.id;
+  if (!id) {
+    return createResponse(400, { error: 'ID parameter required' });
+  }
+  
+  if (!event.body) {
+    return createResponse(400, { error: 'Request body required' });
+  }
+  
+  const updates = JSON.parse(event.body);
+  addTimestamps(updates, true);
+  updates.updatedBy = user.id;
+  
+  const updateExpressions: string[] = [];
+  const expressionAttributeNames: Record<string, string> = {};
+  const expressionAttributeValues: Record<string, any> = {};
+  
+  Object.keys(updates).forEach((key, index) => {
+    const attrName = `#attr${index}`;
+    const attrValue = `:val${index}`;
+    updateExpressions.push(`${attrName} = ${attrValue}`);
+    expressionAttributeNames[attrName] = key;
+    expressionAttributeValues[attrValue] = updates[key];
+  });
+  
+  await docClient.send(new UpdateCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      pk: tableConfig.name,
+      sk: id
+    },
+    UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+    ExpressionAttributeNames: expressionAttributeNames,
+    ExpressionAttributeValues: expressionAttributeValues,
+    ReturnValues: 'ALL_NEW'
+  }));
+  
+  await createAuditLog(user, 'UPDATE', tableConfig.name, { id, updates });
+  
+  return createResponse(200, { message: 'Item updated successfully' });
+}
+
+async function handleDelete(event: APIGatewayProxyEvent, tableConfig: TableConfig, user: User): Promise<APIGatewayProxyResult> {
+  checkPermission(user, tableConfig.name, 'delete');
+  
+  const id = event.pathParameters?.id;
+  if (!id) {
+    return createResponse(400, { error: 'ID parameter required' });
+  }
+  
+  await docClient.send(new DeleteCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      pk: tableConfig.name,
+      sk: id
+    }
+  }));
+  
+  await createAuditLog(user, 'DELETE', tableConfig.name, { id });
+  
+  return createResponse(200, { message: 'Item deleted successfully' });
+}
+
+async function handleBulkImport(event: APIGatewayProxyEvent, tableConfig: TableConfig, user: User): Promise<APIGatewayProxyResult> {
+  checkPermission(user, tableConfig.name, 'bulk');
+  
+  if (!event.body) {
+    return createResponse(400, { error: 'Request body required' });
+  }
+  
+  const { items } = JSON.parse(event.body);
+  if (!Array.isArray(items)) {
+    return createResponse(400, { error: 'Items must be an array' });
+  }
+  
+  let imported = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  
+  // Process in batches of 25 (DynamoDB BatchWrite limit)
+  for (let i = 0; i < items.length; i += 25) {
+    const batch = items.slice(i, i + 25);
+    const putRequests = batch.map(item => {
+      const id = generateId();
+      return {
+        PutRequest: {
+          Item: {
+            pk: tableConfig.name,
+            sk: id,
+            [tableConfig.pkField]: id,
+            ...addTimestamps(item),
+            createdBy: user.id,
+            updatedBy: user.id
+          }
+        }
+      };
     });
     
-    updateExpressions.push('#updatedAt = :updatedAt');
-    updateExpressions.push('#updatedBy = :updatedBy');
-    expressionAttributeNames['#updatedAt'] = 'updatedAt';
-    expressionAttributeNames['#updatedBy'] = 'updatedBy';
-    expressionAttributeValues[':updatedAt'] = now;
-    expressionAttributeValues[':updatedBy'] = user.id;
-
-    const result = await docClient.send(new UpdateCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        pk: config.pk,
-        sk: itemId
-      },
-      UpdateExpression: `SET ${updateExpressions.join(', ')}`,
-      ExpressionAttributeNames: expressionAttributeNames,
-      ExpressionAttributeValues: expressionAttributeValues,
-      ReturnValues: 'ALL_NEW'
-    }));
-
-    await writeAuditLog('UPDATE', user.id, { table: config.name, itemId, data });
-
-    return createResponse(200, result.Attributes);
-  } catch (error) {
-    console.error('Error updating item:', error);
-    if (error instanceof SyntaxError) {
-      return createResponse(400, { error: 'Invalid JSON in request body' });
+    try {
+      await docClient.send(new BatchWriteCommand({
+        RequestItems: {
+          [TABLE_NAME]: putRequests
+        }
+      }));
+      imported += batch.length;
+    } catch (error: any) {
+      failed += batch.length;
+      errors.push(`Batch ${Math.floor(i / 25) + 1}: ${error.message}`);
     }
-    return createResponse(500, { error: 'Internal server error' });
   }
-}
-
-async function handleDeleteTableItem(event: APIGatewayProxyEvent, tableIndex: string): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
-  }
-
-  const config = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
-  if (!config) {
-    return createResponse(404, { error: 'Table not found' });
-  }
-
-  if (!hasPermission(user, config.permissions.delete)) {
-    return createResponse(403, { error: 'Forbidden' });
-  }
-
-  const itemId = event.pathParameters?.id;
-  if (!itemId) {
-    return createResponse(400, { error: 'Item ID is required' });
-  }
-
-  try {
-    await docClient.send(new DeleteCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        pk: config.pk,
-        sk: itemId
-      }
-    }));
-
-    await writeAuditLog('DELETE', user.id, { table: config.name, itemId });
-
-    return createResponse(204, {});
-  } catch (error) {
-    console.error('Error deleting item:', error);
-    return createResponse(500, { error: 'Internal server error' });
-  }
-}
-
-async function handleBulkImport(event: APIGatewayProxyEvent, tableIndex: string): Promise<ApiResponse> {
-  const user = getUserFromEvent(event);
-  if (!user) {
-    return createResponse(401, { error: 'Unauthorized' });
-  }
-
-  if (!hasPermission(user, PERMISSIONS.BULK_IMPORT)) {
-    return createResponse(403, { error: 'Forbidden' });
-  }
-
-  const config = TABLE_CONFIGS[tableIndex as keyof typeof TABLE_CONFIGS];
-  if (!config) {
-    return createResponse(404, { error: 'Table not found' });
-  }
-
-  if (!event.body) {
-    return createResponse(400, { error: 'Request body is required' });
-  }
-
-  try {
-    const { items } = JSON.parse(event.body);
-    if (!Array.isArray(items)) {
-      return createResponse(400, { error: 'Items must be an array' });
-    }
-
-    const now = new Date().toISOString();
-    let imported = 0;
-    let failed = 0;
-    const errors: string[] = [];
-
-    // Process items in batches of 25 (DynamoDB BatchWrite limit)
-    for (let i = 0; i < items.length; i += 25) {
-      const batch = items.slice(i, i + 25);
-      const writeRequests = batch.map(item => {
-        const itemId = randomUUID();
-        return {
-          PutRequest: {
-            Item: {
-              ...item,
-              pk: config.pk,
-              sk: itemId,
-              id: itemId,
-              createdAt: now,
-              updatedAt: now,
-              createdBy: user.id,
-              updatedBy: user.id
-            }
-          }
-        };
-      });
-
-      try {
-        await docClient.send(new BatchWriteCommand({
-          RequestItems: {
-            [TABLE_NAME]: writeRequests
-          }
-        }));
-        imported += batch.length;
-      } catch (error) {
-        failed += batch.length;
-        errors.push(`Batch ${Math.floor(i / 25) + 1}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-    }
-
-    await writeAuditLog('BULK_IMPORT', user.id, { table: config.name, imported, failed });
-
-    return createResponse(200, { imported, failed, errors });
-  } catch (error) {
-    console.error('Error in bulk import:', error);
-    if (error instanceof SyntaxError) {
-      return createResponse(400, { error: 'Invalid JSON in request body' });
-    }
-    return createResponse(500, { error: 'Internal server error' });
-  }
+  
+  await createAuditLog(user, 'BULK_IMPORT', tableConfig.name, { imported, failed, totalItems: items.length });
+  
+  return createResponse(200, { imported, failed, errors });
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  if (event.httpMethod === 'OPTIONS') {
-    return createResponse(200, {});
-  }
-
-  const path = event.path;
-  const method = event.httpMethod;
-
   try {
-    // GET /resources
-    if (method === 'GET' && path === '/resources') {
+    if (event.httpMethod === 'OPTIONS') {
+      return createResponse(200, {});
+    }
+
+    const path = event.path;
+    
+    if (path === '/resources') {
       return await handleGetResources(event);
     }
-
-    // Table operations
-    const tableMatch = path.match(/^\/api\/(\d+)(?:\/(\w+))?(?:\/(\w+))?$/);
-    if (tableMatch) {
-      const [, tableIndex, action, itemId] = tableMatch;
-      
-      if (action === 'bulk' && method === 'POST') {
-        return await handleBulkImport(event, tableIndex);
-      }
-      
-      if (!action) {
-        // /api/{tableIndex}
-        if (method === 'GET') {
-          return await handleGetTableData(event, tableIndex);
-        }
-        if (method === 'POST') {
-          return await handleCreateTableItem(event, tableIndex);
-        }
-      } else if (itemId) {
-        // /api/{tableIndex}/{itemId}
-        event.pathParameters = { ...event.pathParameters, id: action };
-        if (method === 'GET') {
-          return await handleGetTableItem(event, tableIndex);
-        }
-        if (method === 'PUT') {
-          return await handleUpdateTableItem(event, tableIndex);
-        }
-        if (method === 'DELETE') {
-          return await handleDeleteTableItem(event, tableIndex);
-        }
-      }
+    
+    const pathMatch = path.match(/^\/api\/(\d+)(?:\/(.+))?$/);
+    if (pathMatch) {
+      const tableIndex = pathMatch[1];
+      return await handleTableOperation(event, tableIndex);
     }
-
-    return createResponse(404, { error: 'Not found' });
-  } catch (error) {
-    console.error('Unhandled error:', error);
+    
+    return createResponse(404, { error: 'Endpoint not found' });
+  } catch (error: any) {
+    console.error('Handler error:', error);
     return createResponse(500, { error: 'Internal server error' });
   }
 };
