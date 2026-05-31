@@ -1,25 +1,45 @@
 export type Role = 'admin' | 'operator' | 'viewer';
 
 export interface Permission {
-  read: boolean;
-  write: boolean;
-  delete: boolean;
+  resource: string;
+  action: 'create' | 'read' | 'update' | 'delete' | 'bulk';
 }
 
-export const ROLE_PERMISSIONS: Record<Role, Permission> = {
-  admin: { read: true, write: true, delete: true },
-  operator: { read: true, write: true, delete: false },
-  viewer: { read: true, write: false, delete: false }
+const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
+  admin: [
+    { resource: '*', action: 'create' },
+    { resource: '*', action: 'read' },
+    { resource: '*', action: 'update' },
+    { resource: '*', action: 'delete' },
+    { resource: '*', action: 'bulk' }
+  ],
+  operator: [
+    { resource: '*', action: 'create' },
+    { resource: '*', action: 'read' },
+    { resource: '*', action: 'update' },
+    { resource: '*', action: 'bulk' }
+  ],
+  viewer: [
+    { resource: '*', action: 'read' }
+  ]
 };
 
-export function hasPermission(role: Role, action: 'read' | 'write' | 'delete'): boolean {
-  const permission = ROLE_PERMISSIONS[role];
-  return permission[action];
+export function hasPermission(role: Role, resource: string, action: Permission['action']): boolean {
+  const permissions = ROLE_PERMISSIONS[role] || [];
+  return permissions.some(p => 
+    (p.resource === '*' || p.resource === resource) && p.action === action
+  );
 }
 
-export function validateRole(role: string): Role {
-  if (!['admin', 'operator', 'viewer'].includes(role)) {
-    throw new Error('Invalid role');
+export function extractUserRole(event: any): Role {
+  const authHeader = event.headers?.Authorization || event.headers?.authorization;
+  if (!authHeader) return 'viewer';
+  
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+    return payload.role || 'viewer';
+  } catch {
+    return 'viewer';
   }
-  return role as Role;
 }
