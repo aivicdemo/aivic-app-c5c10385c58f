@@ -8,7 +8,7 @@ export interface Permission {
   action: 'create' | 'read' | 'update' | 'delete' | 'bulk';
 }
 
-const ROLE_PERMISSIONS: Record<string, Permission[]> = {
+const rolePermissions: Record<string, Permission[]> = {
   admin: [
     { resource: '*', action: 'create' },
     { resource: '*', action: 'read' },
@@ -27,8 +27,8 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   ]
 };
 
-export function hasPermission(user: User, resource: string, action: string): boolean {
-  const permissions = ROLE_PERMISSIONS[user.role] || [];
+export function hasPermission(user: User, resource: string, action: Permission['action']): boolean {
+  const permissions = rolePermissions[user.role] || [];
   return permissions.some(p => 
     (p.resource === '*' || p.resource === resource) && p.action === action
   );
@@ -44,10 +44,10 @@ export function extractUserFromEvent(event: any): User {
     const token = authHeader.replace('Bearer ', '');
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      id: payload.sub || 'unknown',
+      id: payload.sub || payload.userId,
       role: payload.role || 'viewer'
     };
-  } catch {
-    return { id: 'anonymous', role: 'viewer' };
+  } catch (error) {
+    throw new Error('Invalid token');
   }
 }
