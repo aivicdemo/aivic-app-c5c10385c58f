@@ -1,53 +1,36 @@
 export interface User {
   id: string;
   role: 'admin' | 'operator' | 'viewer';
+  permissions: string[];
 }
 
-export interface Permission {
-  resource: string;
-  action: 'create' | 'read' | 'update' | 'delete' | 'bulk';
+export const PERMISSIONS = {
+  READ_ALL: 'read:all',
+  WRITE_ALL: 'write:all',
+  DELETE_ALL: 'delete:all',
+  BULK_IMPORT: 'bulk:import'
+} as const;
+
+export const ROLE_PERMISSIONS = {
+  admin: [PERMISSIONS.READ_ALL, PERMISSIONS.WRITE_ALL, PERMISSIONS.DELETE_ALL, PERMISSIONS.BULK_IMPORT],
+  operator: [PERMISSIONS.READ_ALL, PERMISSIONS.WRITE_ALL, PERMISSIONS.BULK_IMPORT],
+  viewer: [PERMISSIONS.READ_ALL]
+} as const;
+
+export function hasPermission(user: User, permission: string): boolean {
+  return user.permissions.includes(permission);
 }
 
-const ROLE_PERMISSIONS: Record<string, Permission[]> = {
-  admin: [
-    { resource: '*', action: 'create' },
-    { resource: '*', action: 'read' },
-    { resource: '*', action: 'update' },
-    { resource: '*', action: 'delete' },
-    { resource: '*', action: 'bulk' }
-  ],
-  operator: [
-    { resource: '*', action: 'create' },
-    { resource: '*', action: 'read' },
-    { resource: '*', action: 'update' },
-    { resource: '*', action: 'bulk' }
-  ],
-  viewer: [
-    { resource: '*', action: 'read' }
-  ]
-};
-
-export function hasPermission(user: User, resource: string, action: string): boolean {
-  const permissions = ROLE_PERMISSIONS[user.role] || [];
-  return permissions.some(p => 
-    (p.resource === '*' || p.resource === resource) && p.action === action
-  );
+export function createUser(id: string, role: 'admin' | 'operator' | 'viewer'): User {
+  return {
+    id,
+    role,
+    permissions: ROLE_PERMISSIONS[role]
+  };
 }
 
-export function extractUserFromEvent(event: any): User {
-  const authHeader = event.headers?.Authorization || event.headers?.authorization;
-  if (!authHeader) {
-    throw new Error('Authorization header missing');
-  }
-  
-  try {
-    const token = authHeader.replace('Bearer ', '');
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    return {
-      id: payload.sub || payload.userId || 'unknown',
-      role: payload.role || 'viewer'
-    };
-  } catch (error) {
-    throw new Error('Invalid token');
+export function checkPermission(user: User, permission: string): void {
+  if (!hasPermission(user, permission)) {
+    throw new Error(`Insufficient permissions. Required: ${permission}`);
   }
 }
