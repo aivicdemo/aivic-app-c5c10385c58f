@@ -8,7 +8,7 @@ export interface Permission {
   action: 'create' | 'read' | 'update' | 'delete' | 'bulk';
 }
 
-const rolePermissions: Record<string, Permission[]> = {
+const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   admin: [
     { resource: '*', action: 'create' },
     { resource: '*', action: 'read' },
@@ -28,7 +28,7 @@ const rolePermissions: Record<string, Permission[]> = {
 };
 
 export function hasPermission(user: User, resource: string, action: string): boolean {
-  const permissions = rolePermissions[user.role] || [];
+  const permissions = ROLE_PERMISSIONS[user.role] || [];
   return permissions.some(p => 
     (p.resource === '*' || p.resource === resource) && p.action === action
   );
@@ -37,17 +37,17 @@ export function hasPermission(user: User, resource: string, action: string): boo
 export function extractUserFromEvent(event: any): User {
   const authHeader = event.headers?.Authorization || event.headers?.authorization;
   if (!authHeader) {
-    throw new Error('Authorization header required');
+    throw new Error('Authorization header missing');
   }
   
   try {
     const token = authHeader.replace('Bearer ', '');
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      id: payload.sub || 'unknown',
+      id: payload.sub || payload.userId || 'unknown',
       role: payload.role || 'viewer'
     };
-  } catch {
-    return { id: 'anonymous', role: 'viewer' };
+  } catch (error) {
+    throw new Error('Invalid token');
   }
 }
