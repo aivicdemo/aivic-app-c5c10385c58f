@@ -27,7 +27,7 @@ const rolePermissions: Record<string, Permission[]> = {
   ]
 };
 
-export function hasPermission(user: User, resource: string, action: Permission['action']): boolean {
+export function hasPermission(user: User, resource: string, action: string): boolean {
   const permissions = rolePermissions[user.role] || [];
   return permissions.some(p => 
     (p.resource === '*' || p.resource === resource) && p.action === action
@@ -37,14 +37,14 @@ export function hasPermission(user: User, resource: string, action: Permission['
 export function extractUserFromEvent(event: any): User {
   const authHeader = event.headers?.Authorization || event.headers?.authorization;
   if (!authHeader) {
-    throw new Error('Authorization header missing');
+    throw new Error('Authorization header required');
   }
   
   try {
     const token = authHeader.replace('Bearer ', '');
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     return {
-      id: payload.sub || payload.userId || 'unknown',
+      id: payload.sub || 'unknown',
       role: payload.role || 'viewer'
     };
   } catch {
